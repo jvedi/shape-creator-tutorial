@@ -796,14 +796,29 @@ const handleHandResults = (results) => {
   try {
     if (!isApplicationRunning || !ctx || !canvas) return;
     
+    // Clear previous drawings
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     
-    // Draw landmarks
+    // Debug visualization of hand tracking
+    const debugMode = false; // Set to true to show landmark connections
+    
+    // Safety check for results content
+    if (!results || !results.multiHandLandmarks) {
+      return;
+    }
+    
+    // Draw hand landmarks
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      // Draw debug visualization if needed
+      if (debugMode) {
+        drawDebugLandmarks(results.multiHandLandmarks);
+      }
+      
+      // Just draw thumb and index finger tips
       for (const landmarks of results.multiHandLandmarks) {
-        if (!landmarks) continue;
+        if (!landmarks || landmarks.length < 21) continue; // Skip if landmark data is incomplete
         
-        // Draw circles at key points
+        // Draw key points for better visibility
         const drawCircle = (landmark, size = 10, color = 'rgba(0, 255, 255, 0.7)') => {
           if (!landmark) return;
           ctx.beginPath();
@@ -812,12 +827,15 @@ const handleHandResults = (results) => {
           ctx.fill();
         };
         
-        if (landmarks[4]) drawCircle(landmarks[4]); // Thumb tip
-        if (landmarks[8]) drawCircle(landmarks[8]); // Index tip
+        // Draw thumb tip
+        if (landmarks[4]) drawCircle(landmarks[4], 10, 'rgba(255, 100, 255, 0.8)');
         
-        // Add extra visual feedback for pinch gesture
+        // Draw index finger tip
+        if (landmarks[8]) drawCircle(landmarks[8], 10, 'rgba(100, 255, 255, 0.8)');
+        
+        // Check for pinch and draw indicator
         if (landmarks[4] && landmarks[8] && isPinch(landmarks)) {
-          // Draw connecting line for pinch
+          // Connect thumb and index with a line
           ctx.beginPath();
           ctx.moveTo(landmarks[4].x * canvas.width, landmarks[4].y * canvas.height);
           ctx.lineTo(landmarks[8].x * canvas.width, landmarks[8].y * canvas.height);
@@ -825,7 +843,7 @@ const handleHandResults = (results) => {
           ctx.lineWidth = 3;
           ctx.stroke();
           
-          // Draw highlight circle
+          // Draw highlight circle at pinch center
           const centerX = (landmarks[4].x + landmarks[8].x) / 2;
           const centerY = (landmarks[4].y + landmarks[8].y) / 2;
           drawCircle({x: centerX, y: centerY}, 15, 'rgba(255, 255, 0, 0.5)');
@@ -833,84 +851,155 @@ const handleHandResults = (results) => {
       }
     }
     
-    // Handle two-hand gestures
+    // Process two-hand gestures (for shape creation and scaling)
     if (results.multiHandLandmarks && results.multiHandLandmarks.length === 2) {
       const [l, r] = results.multiHandLandmarks;
-      if (!l || !r) return;
+      if (!l || !r || l.length < 21 || r.length < 21) return;
       
       const leftPinch = isPinch(l);
       const rightPinch = isPinch(r);
+      
+      // Check if index fingers are close enough
       const indexesClose = areIndexFingersClose(l, r);
-
+      
+      console.log(`Two hands detected - Left pinch: ${leftPinch}, Right pinch: ${rightPinch}, Indexes close: ${indexesClose}`);
+      
+      // Both hands pinching = creation or scaling gesture
       if (leftPinch && rightPinch) {
+        // Get the index finger positions
         const left = l[8];
         const right = r[8];
         if (!left || !right) return;
         
+        // Calculate center point between index fingers
         const centerX = (left.x + right.x) / 2;
         const centerY = (left.y + right.y) / 2;
+        
+        // Calculate distance between index fingers (for scaling)
         const distance = Math.hypot(left.x - right.x, left.y - right.y);
-
+        
+        // Visual feedback for two-hand gesture
+        ctx.beginPath();
+        ctx.arc(centerX * canvas.width, centerY * canvas.height, 20, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.5)';
+        ctx.fill();
+        
+        // Draw line between hands
+        ctx.beginPath();
+        ctx.moveTo(left.x * canvas.width, left.y * canvas.height);
+        ctx.lineTo(right.x * canvas.width, right.y * canvas.height);
+        ctx.strokeStyle = 'rgba(255, 255, 0, 0.7)';
+        ctx.lineWidth = 5;
+        ctx.stroke();
+        
         if (!isPinching) {
+          // Starting a new pinch gesture
+          console.log("Starting new pinch gesture");
           const now = Date.now();
+          
+          // Create a new shape if fingers are close enough and cooldown has passed
           if (!shapeCreatedThisPinch && indexesClose && now - lastShapeCreationTime > shapeCreationCooldown) {
-            currentShape = createRandomShape(get3DCoords(centerX, centerY));
+            console.log("Creating new shape at", centerX, centerY);
+            // Convert 2D normalized coordinates to 3D world coordinates
+            const position = get3DCoords(centerX, centerY);
+            
+            // Create the shape and store reference
+            currentShape = createRandomShape(position);
+            
+            // Update state
             lastShapeCreationTime = now;
             shapeCreatedThisPinch = true;
             originalDistance = distance;
+            
+            // Log success
+            console.log("Shape created:", currentShape);
           }
         } else if (currentShape && originalDistance) {
+          // Already pinching, perform scaling
+          console.log("Scaling existing shape");
+          
+          // Calculate scale factor
           shapeScale = distance / originalDistance;
+          
+          // Apply scaling to the shape
           currentShape.scale.set(shapeScale, shapeScale, shapeScale);
+          
+          // Update status
           updateStatus(`Scaling shape (${shapeScale.toFixed(2)}x)`);
         }
+        
+        // Update state
         isPinching = true;
-        recycleBinElement.classList.remove('active');
-        return;
+        
+        // Ensure recycle bin is not active during creation/scaling
+        if (recycleBinElement) {
+          recycleBinElement.classList.remove('active');
+        }
+        
+        return; // Exit early to avoid further processing
       }
     }
-
+    
+    // If we reach here, we're not in a two-hand pinch gesture
     isPinching = false;
     shapeCreatedThisPinch = false;
     originalDistance = null;
     currentShape = null;
-
-    // Handle single-hand gestures
+    
+    // Process single-hand gestures (for shape selection and movement)
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       for (const landmarks of results.multiHandLandmarks) {
-        if (!landmarks || !landmarks[8]) continue;
+        if (!landmarks || landmarks.length < 21 || !landmarks[8]) continue;
         
+        // Get index finger tip position
         const indexTip = landmarks[8];
+        
+        // Convert to 3D space
         const position = get3DCoords(indexTip.x, indexTip.y);
-
+        
+        // Check for pinch gesture (thumb and index finger)
         if (isPinch(landmarks)) {
+          console.log("Single hand pinch detected");
+          
+          // If no shape is selected, try to find the nearest one
           if (!selectedShape) {
             selectedShape = findNearestShape(position);
             if (selectedShape) {
+              console.log("Selected shape:", selectedShape);
               updateStatus('Shape selected');
             }
           }
           
+          // If a shape is selected, move it
           if (selectedShape) {
+            // Move shape to follow finger position
             selectedShape.position.copy(position);
             updateStatus('Moving shape');
-
+            
+            // Check if shape is over recycle bin
             const inBin = isInRecycleBinZone(selectedShape.position);
+            
+            // Change wireframe color based on bin position
             selectedShape.children.forEach(child => {
               if (child.material && child.material.wireframe) {
                 child.material.color.set(inBin ? 0xff0000 : 0xffffff);
               }
             });
             
-            if (inBin) {
-              recycleBinElement.classList.add('active');
-              updateStatus('Release to delete shape');
-            } else {
-              recycleBinElement.classList.remove('active');
+            // Highlight recycle bin if shape is over it
+            if (recycleBinElement) {
+              if (inBin) {
+                recycleBinElement.classList.add('active');
+                updateStatus('Release to delete shape');
+              } else {
+                recycleBinElement.classList.remove('active');
+              }
             }
           }
         } else {
+          // Pinch released - handle shape release or deletion
           if (selectedShape) {
+            // Check if shape should be deleted
             if (isInRecycleBinZone(selectedShape.position)) {
               scene.remove(selectedShape);
               shapes = shapes.filter(s => s !== selectedShape);
@@ -918,23 +1007,84 @@ const handleHandResults = (results) => {
             } else {
               updateStatus('Shape released');
             }
+            
+            // Clear selection
             selectedShape = null;
           }
-          recycleBinElement.classList.remove('active');
+          
+          // Ensure recycle bin is not highlighted
+          if (recycleBinElement) {
+            recycleBinElement.classList.remove('active');
+          }
         }
       }
     } else {
+      // No hands detected - clean up any state
       if (selectedShape && isInRecycleBinZone(selectedShape.position)) {
         scene.remove(selectedShape);
         shapes = shapes.filter(s => s !== selectedShape);
         updateStatus('Shape deleted');
       }
+      
       selectedShape = null;
-      recycleBinElement.classList.remove('active');
+      
+      if (recycleBinElement) {
+        recycleBinElement.classList.remove('active');
+      }
     }
   } catch (error) {
     console.error('Error in hand tracking results handler:', error);
     // Don't stop the application for gesture recognition errors
+  }
+};
+
+// Helper to draw debug landmarks (useful for development)
+const drawDebugLandmarks = (multiHandLandmarks) => {
+  for (const landmarks of multiHandLandmarks) {
+    if (!landmarks) continue;
+    
+    // Draw all landmarks
+    for (let i = 0; i < landmarks.length; i++) {
+      const landmark = landmarks[i];
+      if (!landmark) continue;
+      
+      ctx.beginPath();
+      ctx.arc(landmark.x * canvas.width, landmark.y * canvas.height, 5, 0, 2 * Math.PI);
+      ctx.fillStyle = 'rgba(0, 255, 0, 0.5)';
+      ctx.fill();
+      
+      // Add index number for reference
+      ctx.fillStyle = 'white';
+      ctx.font = '10px Arial';
+      ctx.fillText(i.toString(), landmark.x * canvas.width + 5, landmark.y * canvas.height - 5);
+    }
+    
+    // Draw connections between landmarks for better visualization
+    const connections = [
+      // Thumb
+      [0, 1], [1, 2], [2, 3], [3, 4],
+      // Index finger
+      [0, 5], [5, 6], [6, 7], [7, 8],
+      // Middle finger
+      [0, 9], [9, 10], [10, 11], [11, 12],
+      // Ring finger
+      [0, 13], [13, 14], [14, 15], [15, 16],
+      // Pinky
+      [0, 17], [17, 18], [18, 19], [19, 20],
+      // Palm
+      [0, 5], [5, 9], [9, 13], [13, 17]
+    ];
+    
+    for (const [i, j] of connections) {
+      if (!landmarks[i] || !landmarks[j]) continue;
+      
+      ctx.beginPath();
+      ctx.moveTo(landmarks[i].x * canvas.width, landmarks[i].y * canvas.height);
+      ctx.lineTo(landmarks[j].x * canvas.width, landmarks[j].y * canvas.height);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
   }
 };
 
