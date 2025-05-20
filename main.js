@@ -1,4 +1,144 @@
-// DOM element references with safety checks
+// Setup mouse controls as fallback for when hand tracking isn't available
+const setupMouseControls = () => {
+  const threeCanvas = document.querySelector('#three-canvas canvas');
+  if (!threeCanvas) return;
+  
+  let isDragging = false;
+  let selectedViaMouseShape = null;
+  let mousePosition = new THREE.Vector3();
+  let raycaster = new THREE.Raycaster();
+  
+  // Convert mouse position to 3D coordinates
+  const getMousePosition = (event, canvas) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    const y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    return { x, y };
+  };
+  
+  // Find shape under mouse cursor
+  const findShapeUnderMouse = (event) => {
+    const mousePos = getMousePosition(event, threeCanvas);
+    raycaster.setFromCamera(new THREE.Vector2(mousePos.x, mousePos.y), camera);
+    const intersects = raycaster.intersectObjects(shapes, true);
+    
+    if (intersects.length > 0) {
+      // Find the parent group of the intersected object
+      let parentShape = intersects[0].object;
+      while (parentShape.parent && parentShape.parent !== scene) {
+        parentShape = parentShape.parent;
+      }
+      
+      // Check if the parent is one of our shapes
+      if (shapes.includes(parentShape)) {
+        return parentShape;
+      }
+    }
+    return null;
+  };
+  
+  // Convert mouse position to world coordinates
+  const mouseToWorld = (event) => {
+    const mousePos = getMousePosition(event, threeCanvas);
+    mousePosition.set(mousePos.x, mousePos.y, 0);
+    mousePosition.unproject(camera);
+    
+    // Calculate the ray from the camera to the mousePosition
+    const direction = mousePosition.sub(camera.position).normalize();
+    
+    // Calculate distance to z=0 plane
+    const distance = -camera.position.z / direction.z;
+    
+    // Get the 3D point
+    return camera.position.clone().add(direction.multiplyScalar(distance));
+  };
+  
+  // Mouse event handlers
+  threeCanvas.addEventListener('mousedown', (event) => {
+    const shape = findShapeUnderMouse(event);
+    if (shape) {
+      selectedViaMouseShape = shape;
+      isDragging = true;
+      updateStatus('Shape selected with mouse');
+      
+      // Highlight the selected shape
+      shape.children.forEach(child => {
+        if (child.material && child.material.wireframe) {
+          child.material.color.set(0x00ffff);
+        }
+      });
+    } else if (event.button === 0) { // Left click on empty space
+      // Create a new shape at mouse position
+      const worldPos = mouseToWorld(event);
+      createRandomShape(worldPos);
+    }
+  });
+  
+  threeCanvas.addEventListener('mousemove', (event) => {
+    if (isDragging && selectedViaMouseShape) {
+      const worldPos = mouseToWorld(event);
+      selectedViaMouseShape.position.copy(worldPos);
+      
+      // Check if shape is over recycle bin
+      const inBin = isInRecycleBinZone(selectedViaMouseShape.position);
+      selectedViaMouseShape.children.forEach(child => {
+        if (child.material && child.material.wireframe) {
+          child.material.color.set(inBin ? 0xff0000 : 0x00ffff);
+        }
+      });
+      
+      // Update recycle bin visual
+      if (recycleBinElement) {
+        if (inBin) {
+          recycleBinElement.classList.add('active');
+          updateStatus('Release to delete shape');
+        } else {
+          recycleBinElement.classList.remove('active');
+          updateStatus('Dragging shape');
+        }
+      }
+    }
+  });
+  
+  threeCanvas.addEventListener('mouseup', () => {
+    if (isDragging && selectedViaMouseShape) {
+      // Check if shape should be deleted
+      if (isInRecycleBinZone(selectedViaMouseShape.position)) {
+        scene.remove(selectedViaMouseShape);
+        shapes = shapes.filter(s => s !== selectedViaMouseShape);
+        updateStatus('Shape deleted');
+      } else {
+        // Reset wireframe color
+        selectedViaMouseShape.children.forEach(child => {
+          if (child.material && child.material.wireframe) {
+            child.material.color.set(0xffffff);
+          }
+        });
+        updateStatus('Shape released');
+      }
+    }
+    
+    isDragging = false;
+    selectedViaMouseShape = null;
+    if (recycleBinElement) {
+      recycleBinElement.classList.remove('active');
+    }
+  });
+  
+  // Add mouse wheel for scaling shapes
+  threeCanvas.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    
+    // Find shape under mouse
+    const shape = findShapeUnderMouse(event);
+    if (shape) {
+      // Scale the shape based on wheel direction
+      const scaleFactor = event.deltaY > 0 ? 0.9 : 1.1;
+      shape.scale.multiplyScalar(scaleFactor);
+      updateStatus(`Scaling shape (${shape.scale.x.toFixed(2)}x)`);
+    }
+  });
+};// DOM element references with safety checks
 const getElement = (id) => {
   const element = document.getElementById(id);
   if (!element) {
@@ -26,44 +166,155 @@ let handsInitialized = false;
 // App initialization with error handling
 const initApp = () => {
   try {
-    // Check for required elements
-    video = getElement('webcam');
-    canvas = getElement('canvas');
-    ctx = canvas.getContext('2d');
-    recycleBinElement = getElement('recycle-bin');
-    
-    // Check for THREE.js availability
-    if (typeof THREE === 'undefined') {
-      showError('THREE.js not loaded. Please check your internet connection and reload the page.');
-      return;
+    // Check for required elements with fallback creation
+    try {
+      video = getElement('webcam');
+    } catch (e) {
+      console.warn('Creating webcam element:', e);
+      video = document.createElement('video');
+      video.id = 'webcam';
+      video.setAttribute('playsinline', '');
+      video.style.display = 'none';
+      document.body.appendChild(video);
     }
     
-    // Create status indicator
-    createStatusIndicator();
+    try {
+      canvas = getElement('canvas');
+    } catch (e) {
+      console.warn('Creating canvas element:', e);
+      canvas = document.createElement('canvas');
+      canvas.id = 'canvas';
+      document.body.appendChild(canvas);
+    }
     
-    // Initialize application components with proper error handling
-    initThree()
-      .then(() => initMediaPipeHands())
-      .then(() => initCamera())
-      .then(() => {
-        isApplicationRunning = true;
-        updateStatus('Ready! Use pinch gestures to create and manipulate shapes.');
-      })
-      .catch(error => {
-        console.error('Error initializing application:', error);
-        showError(`Error initializing application: ${error.message}`);
-      });
+    ctx = canvas.getContext('2d');
     
-    // Set up window resize handler
-    window.addEventListener('resize', handleWindowResize);
+    try {
+      recycleBinElement = getElement('recycle-bin');
+    } catch (e) {
+      console.warn('Creating recycle bin element:', e);
+      recycleBinElement = document.createElement('div');
+      recycleBinElement.id = 'recycle-bin';
+      recycleBinElement.innerHTML = '�️';
+      recycleBinElement.style.cssText = 'position: fixed; bottom: 20px; right: 20px; width: 60px; height: 60px; background: rgba(0,0,0,0.5); border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 30px; z-index: 999; transition: all 0.3s;';
+      document.body.appendChild(recycleBinElement);
+    }
     
-    // Set up cleanup on page unload
-    window.addEventListener('beforeunload', cleanup);
+    // Check for THREE.js container
+    try {
+      getElement('three-canvas');
+    } catch (e) {
+      console.warn('Creating THREE.js container:', e);
+      const threeContainer = document.createElement('div');
+      threeContainer.id = 'three-canvas';
+      threeContainer.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1;';
+      document.body.appendChild(threeContainer);
+    }
     
+    // Check for THREE.js availability with dynamic loading fallback
+    if (typeof THREE === 'undefined') {
+      updateStatus('Loading THREE.js...');
+      return loadScript('https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js')
+        .then(() => {
+          console.log('THREE.js loaded dynamically');
+          return continueInitialization();
+        })
+        .catch(error => {
+          showError(`Failed to load THREE.js: ${error.message}`);
+          return Promise.reject(error);
+        });
+    } else {
+      return continueInitialization();
+    }
   } catch (error) {
     console.error('Critical initialization error:', error);
     showError(`Critical error: ${error.message}`);
+    return Promise.reject(error);
   }
+};
+
+// Load a script dynamically
+const loadScript = (url) => {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = url;
+    script.onload = resolve;
+    script.onerror = () => reject(new Error(`Failed to load script: ${url}`));
+    document.head.appendChild(script);
+  });
+};
+
+// Continue initialization after ensuring dependencies
+const continueInitialization = () => {
+  // Create status indicator
+  createStatusIndicator();
+  
+  // Load dependencies in sequence with fallbacks
+  return loadDependencies()
+    .then(() => initThree())
+    .then(() => {
+      // Try to initialize MediaPipe, but continue even if it fails
+      return initMediaPipeHands()
+        .catch(error => {
+          console.warn('MediaPipe initialization failed, continuing in offline mode:', error);
+          enableOfflineMode();
+          return Promise.resolve(); // Continue initialization
+        });
+    })
+    .then(() => initCamera())
+    .then(() => {
+      isApplicationRunning = true;
+      updateStatus('Ready! Use pinch gestures or mouse to interact with shapes.');
+    })
+    .catch(error => {
+      console.error('Error in initialization sequence:', error);
+      showError(`Error initializing application: ${error.message}`);
+      // Try to enable offline mode as last resort
+      enableOfflineMode();
+    });
+};
+
+// Load required dependencies
+const loadDependencies = async () => {
+  updateStatus('Loading dependencies...');
+  
+  const dependencies = [
+    { 
+      name: 'MediaPipe Hands', 
+      check: () => typeof Hands !== 'undefined',
+      url: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.min.js',
+      fallbackUrl: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js'
+    },
+    { 
+      name: 'MediaPipe Camera', 
+      check: () => typeof Camera !== 'undefined',
+      url: 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3/camera_utils.js',
+      fallbackUrl: 'https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js'
+    }
+  ];
+  
+  for (const dep of dependencies) {
+    if (!dep.check()) {
+      updateStatus(`Loading ${dep.name}...`);
+      try {
+        await loadScript(dep.url);
+        console.log(`${dep.name} loaded successfully`);
+      } catch (error) {
+        console.warn(`Failed to load ${dep.name} from primary URL, trying fallback:`, error);
+        try {
+          await loadScript(dep.fallbackUrl);
+          console.log(`${dep.name} loaded from fallback URL`);
+        } catch (fallbackError) {
+          console.error(`Failed to load ${dep.name}:`, fallbackError);
+          // Continue without throwing to attempt offline mode
+        }
+      }
+    } else {
+      console.log(`${dep.name} already loaded`);
+    }
+  }
+  
+  return Promise.resolve();
 };
 
 // Create status indicator for user feedback
@@ -354,38 +605,191 @@ const isInRecycleBinZone = (position) => {
   }
 };
 
-// MediaPipe Hands initialization with error handling
+// MediaPipe Hands initialization with error handling and resource preloading
 const initMediaPipeHands = async () => {
   try {
-    updateStatus('Initializing hand tracking...');
+    updateStatus('Loading hand tracking models...');
+    
+    // Create offline fallback URLs for resources
+    const MEDIAPIPE_URLS = [
+      'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915',
+      'https://cdn.jsdelivr.net/npm/@mediapipe/hands'
+    ];
+    
+    // Test CDN connectivity before initializing
+    await testCdnConnectivity();
     
     const hands = new Hands({ 
-      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` 
+      locateFile: file => {
+        // Try to use a more specific version to avoid CDN caching issues
+        return `${MEDIAPIPE_URLS[0]}/${file}`;
+      }
     });
     
+    // Reduce model complexity for better performance and less network dependency
     hands.setOptions({ 
       maxNumHands: 2, 
-      modelComplexity: 1, 
-      minDetectionConfidence: 0.7, 
-      minTrackingConfidence: 0.7 
+      modelComplexity: 0,  // Use simpler model (0 instead of 1)
+      minDetectionConfidence: 0.6,  // Slightly lower threshold
+      minTrackingConfidence: 0.6    // Slightly lower threshold
     });
 
-    hands.onResults(handleHandResults);
+    // Set up custom error handler for MediaPipe internal errors
+    hands.onResults((results) => {
+      try {
+        handleHandResults(results);
+      } catch (error) {
+        console.error("Error in hand tracking results handler:", error);
+      }
+    });
     
     // Check for compatibility
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       throw new Error('MediaDevices API not supported in this browser');
     }
     
+    // Preload the model to avoid "Failed to fetch" errors during camera streaming
+    updateStatus('Preloading hand tracking models (this may take a moment)...');
+    
+    await hands.initialize()
+      .catch(error => {
+        console.error("Failed to initialize with primary CDN:", error);
+        // If primary CDN fails, try alternate CDN
+        updateStatus('Trying alternate model source...');
+        
+        // Create new hands instance with alternate CDN
+        const fallbackHands = new Hands({
+          locateFile: file => `${MEDIAPIPE_URLS[1]}/${file}`
+        });
+        
+        fallbackHands.setOptions({ 
+          maxNumHands: 2, 
+          modelComplexity: 0,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.6
+        });
+        
+        fallbackHands.onResults((results) => {
+          try {
+            handleHandResults(results);
+          } catch (error) {
+            console.error("Error in hand tracking results handler:", error);
+          }
+        });
+        
+        return fallbackHands.initialize()
+          .then(() => {
+            // Use fallback instance instead
+            hands = fallbackHands;
+          });
+      });
+    
     // Set global variable for camera initialization
     window.hands = hands;
     handsInitialized = true;
-    updateStatus('Hand tracking initialized');
+    updateStatus('Hand tracking initialized successfully');
     return Promise.resolve();
   } catch (error) {
     console.error('MediaPipe Hands initialization error:', error);
-    return Promise.reject(new Error('Failed to initialize hand tracking'));
+    // Create a special offline mode for the app
+    enableOfflineMode();
+    return Promise.reject(new Error(`Failed to initialize hand tracking: ${error.message}`));
   }
+};
+
+// Test CDN connectivity before initializing MediaPipe
+const testCdnConnectivity = async () => {
+  try {
+    updateStatus('Testing network connection...');
+    
+    // Test connectivity to MediaPipe CDN with a small resource
+    const testUrl = 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands_solution_packed_assets.data';
+    
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000); // 5 second timeout
+    
+    const response = await fetch(testUrl, { 
+      method: 'HEAD',
+      signal: controller.signal,
+      mode: 'cors',
+      cache: 'no-cache'
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`CDN connectivity test failed with status: ${response.status}`);
+    }
+    
+    updateStatus('Network connection successful');
+  } catch (error) {
+    console.warn('CDN connectivity test failed:', error);
+    updateStatus('Network issues detected - trying offline mode');
+    
+    // Show a warning to the user
+    showNetworkWarning();
+  }
+};
+
+// Show a network warning message to the user
+const showNetworkWarning = () => {
+  const warningEl = document.createElement('div');
+  warningEl.id = 'network-warning';
+  warningEl.style.cssText = 'position: fixed; top: 10px; right: 10px; background: rgba(255, 165, 0, 0.8); color: white; padding: 10px; border-radius: 5px; z-index: 1000; max-width: 250px;';
+  warningEl.innerHTML = `
+    <strong>⚠️ Network Warning</strong>
+    <p>Having trouble accessing hand tracking models. Hand tracking may not work properly.</p>
+    <button id="retry-network" style="background: white; color: black; border: none; padding: 5px 10px; margin-top: 5px; border-radius: 3px; cursor: pointer;">Retry</button>
+  `;
+  document.body.appendChild(warningEl);
+  
+  // Add retry button functionality
+  document.getElementById('retry-network').addEventListener('click', async () => {
+    warningEl.remove();
+    try {
+      await testCdnConnectivity();
+      // Reinitialize MediaPipe if connection is restored
+      await initMediaPipeHands();
+    } catch (error) {
+      console.error('Network retry failed:', error);
+      showNetworkWarning();
+    }
+  });
+};
+
+// Enable a limited offline mode that works without hand tracking
+const enableOfflineMode = () => {
+  updateStatus('⚠️ Running in limited mode (no hand tracking)');
+  
+  // Create UI for manual controls as fallback
+  const controlsEl = document.createElement('div');
+  controlsEl.id = 'offline-controls';
+  controlsEl.style.cssText = 'position: fixed; bottom: 10px; right: 10px; background: rgba(0, 0, 0, 0.7); color: white; padding: 15px; border-radius: 5px; z-index: 1000;';
+  controlsEl.innerHTML = `
+    <h3 style="margin-top: 0;">Manual Controls</h3>
+    <p>Hand tracking unavailable - use these controls instead:</p>
+    <button id="create-shape" style="background: #00FFFF; color: black; border: none; padding: 8px; margin: 5px; width: 100%; border-radius: 3px; cursor: pointer;">Create Random Shape</button>
+    <button id="clear-shapes" style="background: #FF3300; color: white; border: none; padding: 8px; margin: 5px; width: 100%; border-radius: 3px; cursor: pointer;">Clear All Shapes</button>
+  `;
+  document.body.appendChild(controlsEl);
+  
+  // Add click handlers for manual controls
+  document.getElementById('create-shape').addEventListener('click', () => {
+    // Create a shape at a random position
+    const randomX = (Math.random() - 0.5) * 6;
+    const randomY = (Math.random() - 0.5) * 4;
+    createRandomShape(new THREE.Vector3(randomX, randomY, 0));
+  });
+  
+  document.getElementById('clear-shapes').addEventListener('click', () => {
+    // Remove all shapes
+    shapes.forEach(shape => scene.remove(shape));
+    shapes = [];
+    updateStatus('All shapes cleared');
+  });
+  
+  // Add mouse controls for interaction in offline mode
+  setupMouseControls();
 };
 
 const handleHandResults = (results) => {
@@ -544,11 +948,6 @@ const initCamera = async () => {
       throw new Error('Camera API not supported in this browser');
     }
     
-    // Check if MediaPipe Hands is initialized
-    if (!handsInitialized || !window.hands) {
-      throw new Error('Hand tracking must be initialized before camera');
-    }
-    
     // Try with preferred settings first
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
@@ -590,6 +989,9 @@ const initCamera = async () => {
     return Promise.resolve();
   } catch (error) {
     console.error('Camera initialization error:', error);
+    
+    // Enable mouse controls as a fallback
+    enableOfflineMode();
     return Promise.reject(error);
   }
 };
@@ -611,25 +1013,54 @@ const setupCameraStream = async (stream) => {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         
-        // Create Camera instance for MediaPipe
-        const cameraInstance = new Camera(video, {
-          onFrame: async () => {
-            try {
-              if (window.hands) {
-                await window.hands.send({ image: video });
+        // Create Camera instance for MediaPipe with error handling
+        try {
+          const cameraInstance = new Camera(video, {
+            onFrame: async () => {
+              try {
+                if (window.hands && isApplicationRunning) {
+                  await window.hands.send({ image: video })
+                    .catch(error => {
+                      // Handle MediaPipe send errors without crashing
+                      console.warn('Error sending frame to MediaPipe:', error);
+                      
+                      // Count consecutive errors
+                      if (!window.frameErrorCount) window.frameErrorCount = 0;
+                      window.frameErrorCount++;
+                      
+                      // If we have too many consecutive errors, switch to offline mode
+                      if (window.frameErrorCount > 30) {
+                        console.error('Too many frame processing errors, switching to offline mode');
+                        enableOfflineMode();
+                        throw new Error('Hand tracking failed - switched to offline mode');
+                      }
+                    });
+                  
+                  // Reset error count on success
+                  window.frameErrorCount = 0;
+                }
+              } catch (error) {
+                console.error('Error processing frame:', error);
+                // Don't reject the promise, just log the error and continue
               }
-            } catch (error) {
-              console.error('Error processing frame:', error);
-              // Continue processing next frames
-            }
-          },
-          width: video.videoWidth,
-          height: video.videoHeight
-        });
-        
-        cameraInstance.start()
-          .then(resolve)
-          .catch(reject);
+            },
+            width: video.videoWidth,
+            height: video.videoHeight
+          });
+          
+          cameraInstance.start()
+            .then(resolve)
+            .catch(err => {
+              console.error('Camera start error:', err);
+              // Try a fallback approach without MediaPipe Camera
+              setupFallbackRendering(video);
+              resolve(); // Resolve anyway to continue app initialization
+            });
+        } catch (cameraError) {
+          console.error('Error creating Camera instance:', cameraError);
+          setupFallbackRendering(video);
+          resolve(); // Resolve anyway to continue app initialization
+        }
       };
       
       // Handle loading errors
@@ -641,6 +1072,21 @@ const setupCameraStream = async (stream) => {
       reject(error);
     }
   });
+};
+
+// Setup fallback rendering without MediaPipe Camera
+const setupFallbackRendering = (videoElement) => {
+  updateStatus('Using fallback video rendering');
+  
+  // Make video visible as fallback
+  videoElement.style.display = 'block';
+  videoElement.style.position = 'absolute';
+  videoElement.style.zIndex = '-1';
+  videoElement.style.opacity = '0.7';
+  videoElement.play().catch(e => console.error('Video play error:', e));
+  
+  // Enable mouse controls since hand tracking might be unreliable
+  setupMouseControls();
 };
 
 // Start the application when the document is fully loaded
