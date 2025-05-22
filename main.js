@@ -363,32 +363,83 @@ const showError = (message) => {
 };
 
 // THREE.js initialization with error handling
+// Modified version of initThree with better camera and renderer setup
 const initThree = async () => {
   try {
-    scene = new THREE.Scene();
-    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    camera.position.z = 5;
+    updateStatus('Initializing 3D environment...');
     
+    // Create new scene
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    
+    // Set up camera with proper positioning
+    camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.z = 5;  // Position camera 5 units back from origin
+    camera.lookAt(0, 0, 0);  // Look at the center
+    
+    // Try to create WebGL renderer with fallback options
     try {
-      renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+      renderer = new THREE.WebGLRenderer({ 
+        alpha: true,           // Transparent background
+        antialias: true,       // Smoother edges
+        preserveDrawingBuffer: true  // Allow for screenshots
+      });
+      
+      // Check if creation succeeded
+      if (!renderer) {
+        throw new Error('WebGL renderer creation failed');
+      }
     } catch (e) {
       // Fallback to basic renderer if WebGL not supported
-      console.warn('WebGL renderer failed, falling back to basic renderer:', e);
-      renderer = new THREE.CanvasRenderer({ alpha: true });
+      console.warn('WebGL renderer failed, attempting fallback:', e);
+      
+      try {
+        // Try software renderer as fallback
+        renderer = new THREE.CanvasRenderer({ alpha: true });
+      } catch (fallbackError) {
+        console.error('Both WebGL and fallback renderer failed:', fallbackError);
+        return Promise.reject(new Error('3D rendering not supported in this browser'));
+      }
     }
     
+    // Configure renderer
     renderer.setSize(window.innerWidth, window.innerHeight);
-    getElement('three-canvas').appendChild(renderer.domElement);
+    renderer.setPixelRatio(window.devicePixelRatio);  // For sharper rendering on high-DPI screens
     
-    const light = new THREE.AmbientLight(0xffffff, 1);
-    scene.add(light);
+    // Add renderer to page
+    const threeCanvas = getElement('three-canvas');
+    threeCanvas.innerHTML = '';  // Clear any existing content
+    threeCanvas.appendChild(renderer.domElement);
+    
+    // Add some grid helpers for orientation
+    const gridHelper = new THREE.GridHelper(20, 20, 0x555555, 0x333333);
+    scene.add(gridHelper);
+    
+    // Add axis helper to show orientation (RGB = XYZ)
+    const axisHelper = new THREE.AxesHelper(3);
+    scene.add(axisHelper);
+    
+    // Add ambient light for better visibility
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+    scene.add(ambientLight);
     
     // Add directional light for better visibility
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.5);
     directionalLight.position.set(0, 1, 5);
     scene.add(directionalLight);
     
+    // Create debug visuals
+    createDebugUI();
+    
+    // Start animation loop
     animate();
+    
+    // Create an initial test shape to verify rendering is working
+    setTimeout(() => {
+      createTestShape();
+      logDebug('Initial test shape created');
+    }, 1000);
+    
     updateStatus('3D environment initialized');
     return Promise.resolve();
   } catch (error) {
@@ -397,21 +448,298 @@ const initThree = async () => {
   }
 };
 
+// More informative animation loop with stats
 const animate = () => {
   if (!isApplicationRunning) return;
   
   requestAnimationFrame(animate);
   try {
+    // Animate all shapes except the selected one
     shapes.forEach(shape => {
       if (shape !== selectedShape) {
         shape.rotation.x += 0.01;
         shape.rotation.y += 0.01;
       }
     });
-    renderer.render(scene, camera);
+    
+    // Render the scene
+    if (renderer && scene && camera) {
+      renderer.render(scene, camera);
+    }
   } catch (error) {
     console.error('Animation error:', error);
     // Don't stop animation loop for minor errors
+  }
+};
+
+// Enhanced two-hand gesture detection
+const handleTwoHandGesture = (l, r) => {
+  if (!l || !r || l.length < 21 || r.length < 21) {
+    logDebug('Incomplete landmark data for two-hand gesture');
+    return;
+  }
+  
+  // Check for pinch gestures on both hands
+  const leftPinch = isPinch(l);
+  const rightPinch = isPinch(r);
+  const indexesClose = areIndexFingersClose(l, r);
+  
+  logDebug(`Two hands - Left pinch: ${leftPinch}, Right pinch: ${rightPinch}, Indexes close: ${indexesClose}`);
+  
+  // Both hands pinching = creation or scaling gesture
+  if (leftPinch && rightPinch) {
+    // Get the index finger positions
+    const left = l[8];
+    const right = r[8];
+    if (!left || !right) return;
+    
+    // Calculate center point between index fingers
+    const centerX = (left.x + right.x) / 2;
+    const centerY = (left.y + right.y) / 2;
+    
+    // Calculate distance between index fingers (for scaling)
+    const distance = Math.hypot(left.x - right.x, left.y - right.y);
+    
+    // Draw visual feedback for the gesture
+    if (ctx && canvas) {
+      // Draw connecting line
+      ctx.beginPath();
+      ctx.moveTo(left.x * canvas.width, left.y * canvas.height);
+      ctx.lineTo(right.x * canvas.width, right.y * canvas.height);
+      ctx.strokeStyle = 'rgba(255, 255, 0, 0.7)';
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      
+      // Draw center point
+      ctx.beginPath();
+      ctx.arc(centerX * canvas.width, centerY * canvas.height, 20, 0, 2 * Math.PI);
+      ctx.fillStyle = indexesClose ? 'rgba(0, 255, 0, 0.5)' : 'rgba(255, 255, 0, 0.5)';
+      ctx.fill();
+    }
+    
+    if (!isPinching) {
+      // Starting a new pinch gesture
+      logDebug("Starting new two-hand pinch gesture");
+      const now = Date.now();
+      
+      // Create a new shape if fingers are close enough and cooldown has passed
+      if (!shapeCreatedThisPinch && indexesClose && now - lastShapeCreationTime > shapeCreationCooldown) {
+        logDebug(`Creating shape at center point (${centerX.toFixed(3)}, ${centerY.toFixed(3)})`);
+        
+        // Convert 2D normalized coordinates to 3D world coordinates
+        const position = get3DCoords(centerX, centerY);
+        
+        // Create the shape and get reference
+        currentShape = createRandomShape(position);
+        
+        // Update state if shape was created successfully
+        if (currentShape) {
+          lastShapeCreationTime = now;
+          shapeCreatedThisPinch = true;
+          originalDistance = distance;
+          
+          // Log success
+          logDebug(`Shape created: ${currentShape.uuid}`);
+        } else {
+          logDebug("Shape creation failed!");
+        }
+      }
+    } else if (currentShape && originalDistance) {
+      // Already pinching, perform scaling
+      logDebug(`Scaling shape (original: ${originalDistance.toFixed(3)}, current: ${distance.toFixed(3)})`);
+      
+      // Calculate scale factor
+      shapeScale = distance / originalDistance;
+      
+      // Apply scaling to the shape
+      currentShape.scale.set(shapeScale, shapeScale, shapeScale);
+      
+      // Update status
+      updateStatus(`Scaling shape (${shapeScale.toFixed(2)}x)`);
+    }
+    
+    // Update state
+    isPinching = true;
+    
+    // Ensure recycle bin is not active during creation/scaling
+    if (recycleBinElement) {
+      recycleBinElement.classList.remove('active');
+    }
+    
+    return true; // Signal that we handled a two-hand gesture
+  } else {
+    logDebug("Two hands visible but not both pinching");
+  }
+  
+  return false; // No two-hand gesture was handled
+};
+
+// Update the main handler
+const handleHandResults = (results) => {
+  try {
+    if (!isApplicationRunning || !ctx || !canvas) return;
+    
+    // Clear previous drawings
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // Safety check for results content
+    if (!results || !results.multiHandLandmarks) {
+      return;
+    }
+    
+    // Draw hand landmarks
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      // Draw landmarks for visualization
+      for (const landmarks of results.multiHandLandmarks) {
+        if (!landmarks || landmarks.length < 21) continue; // Skip if landmark data is incomplete
+        
+        // Draw key points for better visibility
+        const drawCircle = (landmark, size = 10, color = 'rgba(0, 255, 255, 0.7)') => {
+          if (!landmark) return;
+          ctx.beginPath();
+          ctx.arc(landmark.x * canvas.width, landmark.y * canvas.height, size, 0, 2 * Math.PI);
+          ctx.fillStyle = color;
+          ctx.fill();
+        };
+        
+        // Draw thumb tip
+        if (landmarks[4]) drawCircle(landmarks[4], 10, 'rgba(255, 100, 255, 0.8)');
+        
+        // Draw index finger tip
+        if (landmarks[8]) drawCircle(landmarks[8], 10, 'rgba(100, 255, 255, 0.8)');
+        
+        // Check for pinch and draw indicator
+        if (landmarks[4] && landmarks[8] && isPinch(landmarks)) {
+          // Connect thumb and index with a line
+          ctx.beginPath();
+          ctx.moveTo(landmarks[4].x * canvas.width, landmarks[4].y * canvas.height);
+          ctx.lineTo(landmarks[8].x * canvas.width, landmarks[8].y * canvas.height);
+          ctx.strokeStyle = 'rgba(255, 255, 0, 0.7)';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          
+          // Draw highlight circle at pinch center
+          const centerX = (landmarks[4].x + landmarks[8].x) / 2;
+          const centerY = (landmarks[4].y + landmarks[8].y) / 2;
+          drawCircle({x: centerX, y: centerY}, 15, 'rgba(255, 255, 0, 0.5)');
+        }
+      }
+    }
+    
+    // Handle two-hand gestures first (for shape creation and scaling)
+    let twoHandGestureHandled = false;
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length === 2) {
+      twoHandGestureHandled = handleTwoHandGesture(
+        results.multiHandLandmarks[0], 
+        results.multiHandLandmarks[1]
+      );
+    }
+    
+    // If two-hand gesture was handled, skip the rest
+    if (twoHandGestureHandled) {
+      return;
+    }
+    
+    // If we reach here, we're not in a two-hand pinch gesture
+    isPinching = false;
+    shapeCreatedThisPinch = false;
+    originalDistance = null;
+    currentShape = null;
+    
+    // Process single-hand gestures (for shape selection and movement)
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+      for (const landmarks of results.multiHandLandmarks) {
+        if (!landmarks || landmarks.length < 21 || !landmarks[8]) continue;
+        
+        // Get index finger tip position
+        const indexTip = landmarks[8];
+        
+        // Convert to 3D space
+        const position = get3DCoords(indexTip.x, indexTip.y);
+        
+        // Check for pinch gesture (thumb and index finger)
+        if (isPinch(landmarks)) {
+          logDebug("Single hand pinch detected");
+          
+          // If no shape is selected, try to find the nearest one
+          if (!selectedShape) {
+            selectedShape = findNearestShape(position);
+            if (selectedShape) {
+              logDebug(`Selected shape: ${selectedShape.uuid}`);
+              updateStatus('Shape selected');
+            } else {
+              logDebug("No shape found nearby to select");
+            }
+          }
+          
+          // If a shape is selected, move it
+          if (selectedShape) {
+            // Move shape to follow finger position
+            selectedShape.position.copy(position);
+            logDebug(`Moving shape to (${position.x.toFixed(2)}, ${position.y.toFixed(2)}, ${position.z.toFixed(2)})`);
+            updateStatus('Moving shape');
+            
+            // Check if shape is over recycle bin
+            const inBin = isInRecycleBinZone(selectedShape.position);
+            
+            // Change wireframe color based on bin position
+            selectedShape.children.forEach(child => {
+              if (child.material && child.material.wireframe) {
+                child.material.color.set(inBin ? 0xff0000 : 0xffffff);
+              }
+            });
+            
+            // Highlight recycle bin if shape is over it
+            if (recycleBinElement) {
+              if (inBin) {
+                recycleBinElement.classList.add('active');
+                updateStatus('Release to delete shape');
+              } else {
+                recycleBinElement.classList.remove('active');
+              }
+            }
+          }
+        } else {
+          // Pinch released - handle shape release or deletion
+          if (selectedShape) {
+            // Check if shape should be deleted
+            if (isInRecycleBinZone(selectedShape.position)) {
+              scene.remove(selectedShape);
+              shapes = shapes.filter(s => s !== selectedShape);
+              logDebug("Shape deleted in recycle bin");
+              updateStatus('Shape deleted');
+            } else {
+              logDebug("Shape released");
+              updateStatus('Shape released');
+            }
+            
+            // Clear selection
+            selectedShape = null;
+          }
+          
+          // Ensure recycle bin is not highlighted
+          if (recycleBinElement) {
+            recycleBinElement.classList.remove('active');
+          }
+        }
+      }
+    } else {
+      // No hands detected - clean up any state
+      if (selectedShape && isInRecycleBinZone(selectedShape.position)) {
+        scene.remove(selectedShape);
+        shapes = shapes.filter(s => s !== selectedShape);
+        updateStatus('Shape deleted');
+      }
+      
+      selectedShape = null;
+      
+      if (recycleBinElement) {
+        recycleBinElement.classList.remove('active');
+      }
+    }
+  } catch (error) {
+    console.error('Error in hand tracking results handler:', error);
+    logDebug(`Hand tracking error: ${error.message}`);
   }
 };
 
@@ -457,37 +785,174 @@ const getNextNeonColor = () => {
   return color;
 };
 
+// Create debug visualization to help troubleshoot
+const createDebugUI = () => {
+  // Create debug panel if it doesn't exist
+  if (!document.getElementById('debug-panel')) {
+    const debugPanel = document.createElement('div');
+    debugPanel.id = 'debug-panel';
+    debugPanel.style.cssText = 'position: fixed; top: 10px; left: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; z-index: 1000; font-family: monospace; max-width: 300px; max-height: 200px; overflow: auto;';
+    document.body.appendChild(debugPanel);
+  }
+  
+  // Create shape counter if it doesn't exist
+  if (!document.getElementById('shape-counter')) {
+    const shapeCounter = document.createElement('div');
+    shapeCounter.id = 'shape-counter';
+    shapeCounter.style.cssText = 'position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; z-index: 1000; font-family: monospace;';
+    shapeCounter.textContent = 'Shapes: 0';
+    document.body.appendChild(shapeCounter);
+  }
+  
+  // Create camera reset button
+  if (!document.getElementById('camera-reset')) {
+    const resetButton = document.createElement('button');
+    resetButton.id = 'camera-reset';
+    resetButton.textContent = 'Reset Camera';
+    resetButton.style.cssText = 'position: fixed; bottom: 100px; right: 20px; padding: 10px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 5px; cursor: pointer;';
+    resetButton.onclick = resetCamera;
+    document.body.appendChild(resetButton);
+  }
+  
+  // Create test shape button
+  if (!document.getElementById('test-shape')) {
+    const testButton = document.createElement('button');
+    testButton.id = 'test-shape';
+    testButton.textContent = 'Create Test Shape';
+    testButton.style.cssText = 'position: fixed; bottom: 150px; right: 20px; padding: 10px; background: rgba(0,0,0,0.7); color: white; border: none; border-radius: 5px; cursor: pointer;';
+    testButton.onclick = createTestShape;
+    document.body.appendChild(testButton);
+  }
+};
+
+// Reset camera to default position
+const resetCamera = () => {
+  camera.position.set(0, 0, 5);
+  camera.lookAt(0, 0, 0);
+  updateStatus('Camera reset to default position');
+  
+  // Make all shapes visible again by bringing them to center
+  shapes.forEach(shape => {
+    shape.position.set(0, 0, 0);
+  });
+};
+
+// Create a test shape at the center to verify rendering
+const createTestShape = () => {
+  const shape = createRandomShape(new THREE.Vector3(0, 0, 0));
+  if (shape) {
+    updateStatus('Test shape created at center');
+    logDebug('TEST SHAPE CREATED AT (0,0,0)');
+  } else {
+    updateStatus('Failed to create test shape');
+    logDebug('TEST SHAPE CREATION FAILED');
+  }
+};
+
+// Update debug logging
+const logDebug = (message) => {
+  console.log('[DEBUG] ' + message);
+  
+  const debugPanel = document.getElementById('debug-panel');
+  if (debugPanel) {
+    const logEntry = document.createElement('div');
+    logEntry.textContent = message;
+    debugPanel.prepend(logEntry);
+    
+    // Limit entries to keep performance good
+    while (debugPanel.children.length > 10) {
+      debugPanel.removeChild(debugPanel.lastChild);
+    }
+  }
+  
+  // Update shape counter
+  const shapeCounter = document.getElementById('shape-counter');
+  if (shapeCounter) {
+    shapeCounter.textContent = `Shapes: ${shapes.length}`;
+  }
+};
+
+// Enhanced version of createRandomShape with more logging and safety checks
 const createRandomShape = (position) => {
   try {
+    logDebug(`Creating shape at position (${position.x.toFixed(2)}, ${position.y.toFixed(2)}, ${position.z.toFixed(2)})`);
+    
+    // Verify that THREE.js is available
+    if (typeof THREE === 'undefined') {
+      logDebug('ERROR: THREE.js not available');
+      return null;
+    }
+    
+    // Verify that scene exists
+    if (!scene) {
+      logDebug('ERROR: scene not available');
+      return null;
+    }
+    
+    // Select a random geometry
     const geometries = [
-      new THREE.BoxGeometry(),
+      new THREE.BoxGeometry(1, 1, 1),
       new THREE.SphereGeometry(0.5, 32, 32),
       new THREE.ConeGeometry(0.5, 1, 32),
-      new THREE.CylinderGeometry(0.5, 0.5, 1, 32)
+      new THREE.CylinderGeometry(0.5, 0.5, 1, 32),
+      new THREE.TorusGeometry(0.5, 0.2, 16, 32),
+      new THREE.TetrahedronGeometry(0.6)
     ];
-    const geometry = geometries[Math.floor(Math.random() * geometries.length)];
+    
+    const geometryIndex = Math.floor(Math.random() * geometries.length);
+    const geometry = geometries[geometryIndex];
+    const geometryNames = ['Box', 'Sphere', 'Cone', 'Cylinder', 'Torus', 'Tetrahedron'];
+    
+    // Get a neon color
     const color = getNextNeonColor();
+    
+    // Create a group to hold our shape parts
     const group = new THREE.Group();
-
-    const material = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.5 });
+    
+    // Create the filled mesh with semi-transparency
+    const material = new THREE.MeshBasicMaterial({ 
+      color: color, 
+      transparent: true, 
+      opacity: 0.6,
+      side: THREE.DoubleSide  // Render both sides of faces
+    });
     const fillMesh = new THREE.Mesh(geometry, material);
-
-    const wireframeMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true });
+    
+    // Create wireframe outline for better visibility
+    const wireframeMaterial = new THREE.MeshBasicMaterial({ 
+      color: 0xffffff, 
+      wireframe: true,
+      wireframeLinewidth: 2
+    });
     const wireframeMesh = new THREE.Mesh(geometry, wireframeMaterial);
-
+    
+    // Add both meshes to the group
     group.add(fillMesh);
     group.add(wireframeMesh);
+    
+    // Set position
     group.position.copy(position);
+    
+    // Make shape slightly larger for better visibility
+    group.scale.set(1.5, 1.5, 1.5);
+    
+    // Add to scene
     scene.add(group);
-
-    // Add visual feedback for shape creation
-    createFeedbackEffect(position);
-
+    
+    // Store shape in our array
     shapes.push(group);
-    updateStatus(`Shape created (${shapes.length} total)`);
+    
+    // Log creation success with details
+    logDebug(`Created ${geometryNames[geometryIndex]} shape (${shapes.length} total)`);
+    updateStatus(`Created ${geometryNames[geometryIndex]} shape (${shapes.length} total)`);
+    
+    // Create visual feedback effect
+    createFeedbackEffect(position);
+    
     return group;
   } catch (error) {
     console.error('Error creating shape:', error);
+    logDebug(`ERROR creating shape: ${error.message}`);
     updateStatus('Failed to create shape');
     return null;
   }
